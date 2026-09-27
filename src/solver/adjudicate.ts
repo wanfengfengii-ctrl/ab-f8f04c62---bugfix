@@ -18,9 +18,12 @@ import type {
 } from './types';
 
 /**
- * 数值比较容差：质量/力臂为浮点录入，载荷与力矩的边界判定及力矩余量决胜使用。
- * 注意：安装代价不使用此容差——代价是逐位有意义的录入值，按十进制精确比较
- * （见 ./decimal），任何真实的十进制差额（哪怕 1e-10）都必须体现。
+ * 数值比较容差：质量/力臂为浮点录入，仅用于载荷与力矩的**边界判定**
+ * （闭区间的浮点容差接纳）及不可行诊断中的限制分类。
+ * 注意：力矩余量决胜与安装代价比较都不使用此容差——余量按双精度严格
+ * 比较，任何真实存在的余量差（哪怕 5e-10）都优先于成本决胜；代价是
+ * 逐位有意义的录入值，按十进制精确比较（见 ./decimal），任何真实的
+ * 十进制差额（哪怕 1e-10）都必须体现。
  */
 export const EPS = 1e-9;
 
@@ -82,15 +85,17 @@ function lexCompareSteps(a: StepRecord[], b: StepRecord[]): number {
 
 /**
  * 裁决优先级（依次）：
- * 1. 力矩余量（所有前缀中的最小值）最大者优先；
+ * 1. 力矩余量（所有前缀中的最小值）最大者优先——按双精度严格比较：
+ *    只有余量真正相等时成本才参与决胜，任何严格存在的余量差
+ *    （哪怕 5e-10）都不能被成本差覆盖；
  * 2. 总安装代价最小者优先（按录入的十进制值精确比较：0.1+0.2 与 0.3 视为同成本，
  *    而 1e-10 级的真实差额仍严格区分，序号决胜不得覆盖成本差）；
  * 3. 按挂装顺序的 (块录入序号, 位置录入序号) 序列字典序最小者优先。
  */
 function isBetter(a: Candidate, b: Candidate | null): boolean {
   if (b === null) return true;
-  if (a.plan.minTorqueMargin > b.plan.minTorqueMargin + EPS) return true;
-  if (a.plan.minTorqueMargin < b.plan.minTorqueMargin - EPS) return false;
+  if (a.plan.minTorqueMargin > b.plan.minTorqueMargin) return true;
+  if (a.plan.minTorqueMargin < b.plan.minTorqueMargin) return false;
   const costOrder = decimalCompare(a.cost, b.cost);
   if (costOrder < 0) return true;
   if (costOrder > 0) return false;
@@ -173,11 +178,12 @@ export function adjudicate(scenario: Scenario): AdjudicationOutcome {
         // 精确十进制累加本步代价（代价非负，规模 ≤7，开销可忽略）。
         const nextCost = decimalAdd(cost, opt.costDecimal);
         if (best) {
-          // 力矩余量已严格劣于最优解，剪枝。
-          if (nextMinMargin < best.plan.minTorqueMargin - EPS) continue;
-          // 余量无法严格更优，而代价（非负，继续挂装只会更高）已严格更贵，剪枝。
-          // 精确十进制比较：哪怕只差 1e-10 也必须保留更便宜的分支。
-          if (nextMinMargin < best.plan.minTorqueMargin + EPS && decimalCompare(nextCost, best.cost) > 0) {
+          // 力矩余量沿前缀单调不增：已严格劣于最优解的余量无法挽回，剪枝。
+          // 与 isBetter 一致按双精度严格比较，不容差抹平真实余量差。
+          if (nextMinMargin < best.plan.minTorqueMargin) continue;
+          // 余量已无法严格更优（至多持平），而代价（非负，继续挂装只会更高）
+          // 已严格更贵，剪枝。精确十进制比较：哪怕只差 1e-10 也必须保留更便宜的分支。
+          if (nextMinMargin <= best.plan.minTorqueMargin && decimalCompare(nextCost, best.cost) > 0) {
             continue;
           }
         }

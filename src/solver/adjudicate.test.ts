@@ -288,6 +288,70 @@ describe('adjudicate · 可行方案与决胜规则', () => {
     ]);
   });
 
+  it('亚纳米级力矩余量差不得被成本覆盖：严格存在的余量差优先选 S', () => {
+    // 报告场景：b1 可选 R（力臂 1，代价 0）或 S（力臂 0.9999999995，代价 1），
+    // b2~b4 各有两条力臂 0、代价 0 的导轨；载荷上限 4，力矩区间 [-1,1]。
+    // 选 S 时首步力矩余量为 1-0.9999999995 ≈ 5e-10，严格大于选 R 时的 0；
+    // 旧实现以 EPS=1e-9 比较余量，把该真实余量差当并列，按成本错选 R（0,0,0,0）。
+    const outcome = adjudicate({
+      rails: rails(['R', 1], ['S', 0.9999999995], ['Z1', 0], ['Z2', 0]),
+      blocks: [
+        block('b1', 1, [[0, 0], [1, 1]]),
+        block('b2', 1, [[2, 0], [3, 0]]),
+        block('b3', 1, [[2, 0], [3, 0]]),
+        block('b4', 1, [[2, 0], [3, 0]]),
+      ],
+      limits: limits(4, -1, 1),
+    });
+    expect(outcome.feasible).toBe(true);
+    if (!outcome.feasible) return;
+    const plan = outcome.plan;
+    // 完整方案：b1 选余量更大的 S（位置录入序号 #2），其余块按序号决胜取 #1
+    expect(plan.steps).toHaveLength(4);
+    expect(plan.steps.map((s) => s.optionIndex)).toEqual([1, 0, 0, 0]);
+    expect(plan.steps.map((s) => [s.blockIndex, s.railName])).toEqual([
+      [0, 'S'],
+      [1, 'Z1'],
+      [2, 'Z1'],
+      [3, 'Z1'],
+    ]);
+    // 力矩余量严格为 1-0.9999999995（≈5e-10），大于选 R 时的 0
+    const expectedMargin = 1 - 0.9999999995;
+    expect(expectedMargin).toBeGreaterThan(0);
+    expect(expectedMargin).toBeLessThan(EPS); // 佐证该差在旧容差下会被抹平
+    expect(plan.minTorqueMargin).toBe(expectedMargin);
+    // 更安全的方案代价更高：总代价严格为 1（余量差优先于成本）
+    expect(plan.totalCost).toBe(1);
+    // 载荷与力矩边界：最终载荷恰为上限 4，各前缀力矩均在闭区间内
+    expect(plan.finalMass).toBe(4);
+    for (const s of plan.steps) {
+      expect(s.cumulativeMass).toBeLessThanOrEqual(4 + EPS);
+      expect(s.cumulativeTorque).toBeGreaterThanOrEqual(-1 - EPS);
+      expect(s.cumulativeTorque).toBeLessThanOrEqual(1 + EPS);
+    }
+  });
+
+  it('余量真正相等时成本才参与决胜：同余量取更便宜的 R', () => {
+    // 与上一场景同构，但 S 的力臂就是 1（与 R 的余量真正相等，均为 0）：
+    // 成本决胜应选代价 0 的 R，返回 0,0,0,0。
+    const outcome = adjudicate({
+      rails: rails(['R', 1], ['S', 1], ['Z1', 0], ['Z2', 0]),
+      blocks: [
+        block('b1', 1, [[0, 0], [1, 1]]),
+        block('b2', 1, [[2, 0], [3, 0]]),
+        block('b3', 1, [[2, 0], [3, 0]]),
+        block('b4', 1, [[2, 0], [3, 0]]),
+      ],
+      limits: limits(4, -1, 1),
+    });
+    expect(outcome.feasible).toBe(true);
+    if (!outcome.feasible) return;
+    expect(outcome.plan.minTorqueMargin).toBe(0);
+    expect(outcome.plan.totalCost).toBe(0);
+    expect(outcome.plan.steps.map((s) => s.optionIndex)).toEqual([0, 0, 0, 0]);
+    expect(outcome.plan.steps[0].railName).toBe('R');
+  });
+
   it('联合确定位置与次序：不得先选最终位置再事后排序', () => {
     // b4 挂 L（-6）时最终合力矩可为 0，但任何挂装次序都会在中途越界；
     // 只有 b4 挂 H（-3）且 b3 挂 L 并交错挂装才全程安全，且代价更高（9）。

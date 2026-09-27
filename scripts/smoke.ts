@@ -201,6 +201,63 @@ if (r6.feasible) {
   );
 }
 
+// 亚纳米级力矩余量差场景：b1 可选 R（力臂 1，代价 0）或 S（力臂 0.9999999995，
+// 代价 1），b2~b4 各有两条力臂 0、代价 0 的导轨。选 S 的首步余量 1-0.9999999995
+// ≈ 5e-10 严格大于选 R 的 0；余量差真实存在即优先于成本，须返回 1,0,0,0
+// （旧实现以 EPS=1e-9 抹平该余量差，按成本错选 0,0,0,0）。
+const nanoMarginScenario: Scenario = {
+  rails: [
+    { id: 'R', name: 'R', coordinate: 1 },
+    { id: 'S', name: 'S', coordinate: 0.9999999995 },
+    { id: 'Z1', name: 'Z1', coordinate: 0 },
+    { id: 'Z2', name: 'Z2', coordinate: 0 },
+  ],
+  blocks: [
+    { id: 'b1', name: 'b1', mass: 1, options: [{ railId: 'R', cost: 0 }, { railId: 'S', cost: 1 }] },
+    { id: 'b2', name: 'b2', mass: 1, options: [{ railId: 'Z1', cost: 0 }, { railId: 'Z2', cost: 0 }] },
+    { id: 'b3', name: 'b3', mass: 1, options: [{ railId: 'Z1', cost: 0 }, { railId: 'Z2', cost: 0 }] },
+    { id: 'b4', name: 'b4', mass: 1, options: [{ railId: 'Z1', cost: 0 }, { railId: 'Z2', cost: 0 }] },
+  ],
+  limits: { maxLoad: 4, minTorque: -1, maxTorque: 1 },
+};
+
+const r7 = adjudicate(nanoMarginScenario);
+check(r7.feasible, '裁决模块：亚纳米余量差场景应判定为可行');
+if (r7.feasible) {
+  const p = r7.plan;
+  check(p.steps.length === 4, '亚纳米余量：完整方案应覆盖四块配重');
+  check(
+    p.steps.map((s) => s.optionIndex).join(',') === '1,0,0,0',
+    `亚纳米余量：b1 须选余量更大的 S，返回 1,0,0,0（实际 ${p.steps.map((s) => s.optionIndex).join(',')}）`,
+  );
+  check(p.steps[0].railId === 'S', '亚纳米余量：首块 b1 应挂在 S');
+  check(
+    p.minTorqueMargin === 1 - 0.9999999995 && p.minTorqueMargin > 0,
+    `亚纳米余量：最小力矩余量应为 1-0.9999999995 ≈ 5e-10（实际 ${p.minTorqueMargin}）`,
+  );
+  check(p.totalCost === 1, `亚纳米余量：总代价应为 1（实际 ${p.totalCost}）`);
+  check(p.finalMass === 4, '亚纳米余量：最终载荷应恰为上限 4（载荷边界）');
+  check(
+    p.steps.every((s) => s.cumulativeMass <= 4 && Math.abs(s.cumulativeTorque) <= 1),
+    '亚纳米余量：每个前缀状态均满足载荷与力矩限制',
+  );
+}
+
+// 余量真正相等的对照：S 的力臂也是 1（与 R 的余量均为 0，真正相等），
+// 成本决胜才应选代价 0 的 R，返回 0,0,0,0。
+const trueMarginTieScenario: Scenario = {
+  ...nanoMarginScenario,
+  rails: nanoMarginScenario.rails.map((r) => (r.id === 'S' ? { ...r, coordinate: 1 } : r)),
+};
+const r8 = adjudicate(trueMarginTieScenario);
+check(r8.feasible, '裁决模块：余量真相等对照场景应判定为可行');
+if (r8.feasible) {
+  check(
+    r8.plan.steps.map((s) => s.optionIndex).join(',') === '0,0,0,0' && r8.plan.totalCost === 0,
+    `余量真相等：应按成本决胜返回 0,0,0,0、代价 0（实际 ${r8.plan.steps.map((s) => s.optionIndex).join(',')}，代价 ${r8.plan.totalCost}）`,
+  );
+}
+
 // 不可行场景：深度 1 即止步，最深前缀为 b1@R（余量最大），剩余选择同时触发载荷与力矩限制。
 const infeasibleScenario: Scenario = {
   rails: [{ id: 'R', name: 'R', coordinate: 1 }],
