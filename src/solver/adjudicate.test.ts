@@ -254,6 +254,77 @@ describe('adjudicate · 可行方案与决胜规则', () => {
     expect(outcome.plan.steps.map((s) => s.optionIndex)).toEqual([0, 0, 0, 0]);
   });
 
+  it('亚纳米级力矩余量差不得被成本覆盖：严格更高余量的 S 优先于零代价的 R', () => {
+    // 报告场景：4 块质量均为 1 的配重，4 条导轨。b1 可选 R（力臂 1、代价 0）
+    // 或 S（力臂 0.9999999995、代价 1）；b2~b4 均可在两条力臂 0、代价 0 的导轨间
+    // 选择。载荷上限 4、力矩区间 [-1,1]，所有位置均满足载荷与力矩闭区间。
+    // 选 S 的首步力矩余量为 5e-10，严格大于选 R 的 0；旧实现以 EPS=1e-9 比较
+    // 余量，把该差额当并列并按成本错选 R（0,0,0,0）。修复后须返回 1,0,0,0。
+    const outcome = adjudicate({
+      rails: rails(['R', 1], ['S', 0.9999999995], ['Z1', 0], ['Z2', 0]),
+      blocks: [
+        block('b1', 1, [[0, 0], [1, 1]]),
+        block('b2', 1, [[2, 0], [3, 0]]),
+        block('b3', 1, [[2, 0], [3, 0]]),
+        block('b4', 1, [[2, 0], [3, 0]]),
+      ],
+      limits: limits(4, -1, 1),
+    });
+    expect(outcome.feasible).toBe(true);
+    if (!outcome.feasible) return;
+    const plan = outcome.plan;
+    // 完整方案：四块各恰用一次，b1 选 S（位置录入序号 #2），其余按序号取 #1
+    expect(plan.steps).toHaveLength(4);
+    expect(new Set(plan.steps.map((s) => s.blockIndex))).toEqual(new Set([0, 1, 2, 3]));
+    expect(plan.steps.map((s) => s.optionIndex)).toEqual([1, 0, 0, 0]);
+    expect(plan.steps.map((s) => [s.blockIndex, s.railName])).toEqual([
+      [0, 'S'],
+      [1, 'Z1'],
+      [2, 'Z1'],
+      [3, 'Z1'],
+    ]);
+    // 总代价严格为 1（S 的代价；余量差优先，更高的代价必须被接受）
+    expect(plan.totalCost).toBe(1);
+    // 最小力矩余量严格为正，恰为 1 - 0.9999999995（5e-10 级，小于旧容差 EPS）
+    expect(plan.minTorqueMargin).toBe(1 - 0.9999999995);
+    expect(plan.minTorqueMargin).toBeGreaterThan(0);
+    expect(plan.minTorqueMargin).toBeLessThan(EPS);
+    // 载荷与力矩边界：最终载荷恰为上限 4，首步力矩 0.9999999995 落在 [-1,1] 内
+    expect(plan.finalMass).toBe(4);
+    expect(plan.steps[0].cumulativeTorque).toBe(0.9999999995);
+    for (const s of plan.steps) {
+      expect(s.cumulativeMass).toBeLessThanOrEqual(4 + EPS);
+      expect(s.cumulativeTorque).toBeGreaterThanOrEqual(-1 - EPS);
+      expect(s.cumulativeTorque).toBeLessThanOrEqual(1 + EPS);
+    }
+  });
+
+  it('力矩余量真正相等时安装成本才参与决胜：同余量下选零代价的 R', () => {
+    // 与上一场景同构，但 b1 两个位置的力臂都为 1（余量真正相等，均为 0）：
+    // 成本决胜应选零代价的 R，返回 0,0,0,0。
+    const outcome = adjudicate({
+      rails: rails(['R', 1], ['S2', 1], ['Z1', 0], ['Z2', 0]),
+      blocks: [
+        block('b1', 1, [[0, 0], [1, 1]]),
+        block('b2', 1, [[2, 0], [3, 0]]),
+        block('b3', 1, [[2, 0], [3, 0]]),
+        block('b4', 1, [[2, 0], [3, 0]]),
+      ],
+      limits: limits(4, -1, 1),
+    });
+    expect(outcome.feasible).toBe(true);
+    if (!outcome.feasible) return;
+    expect(outcome.plan.minTorqueMargin).toBe(0);
+    expect(outcome.plan.totalCost).toBe(0);
+    expect(outcome.plan.steps.map((s) => s.optionIndex)).toEqual([0, 0, 0, 0]);
+    expect(outcome.plan.steps.map((s) => [s.blockIndex, s.railName])).toEqual([
+      [0, 'R'],
+      [1, 'Z1'],
+      [2, 'Z1'],
+      [3, 'Z1'],
+    ]);
+  });
+
   it('力矩余量最大优先于总代价最小', () => {
     // 便宜方案（代价 2）余量仅 1；居中方案（代价 20）余量 5，必须选后者。
     const outcome = adjudicate({

@@ -18,9 +18,11 @@ import type {
 } from './types';
 
 /**
- * 数值比较容差：质量/力臂为浮点录入，载荷与力矩的边界判定及力矩余量决胜使用。
- * 注意：安装代价不使用此容差——代价是逐位有意义的录入值，按十进制精确比较
- * （见 ./decimal），任何真实的十进制差额（哪怕 1e-10）都必须体现。
+ * 边界判定容差：质量/力臂为浮点录入，仅用于载荷与力矩闭区间的可行性判定，
+ * 吸收浮点舍入噪声（如 0.1+0.2 这类累计误差）。
+ * 注意：决胜比较不使用此容差——力矩余量按浮点计算值严格比较，任何严格存在
+ * 的余量差（哪怕 5e-10）都优先于安装代价，只有余量真正相等成本才可参与；
+ * 安装代价同样是逐位有意义的录入值，按十进制精确比较（见 ./decimal）。
  */
 export const EPS = 1e-9;
 
@@ -82,15 +84,17 @@ function lexCompareSteps(a: StepRecord[], b: StepRecord[]): number {
 
 /**
  * 裁决优先级（依次）：
- * 1. 力矩余量（所有前缀中的最小值）最大者优先；
+ * 1. 力矩余量（所有前缀中的最小值）最大者优先：按浮点计算值严格比较，
+ *    任何严格存在的余量差（哪怕 5e-10）都直接决胜，不被成本覆盖；
+ *    只有余量真正相等时才进入下一层；
  * 2. 总安装代价最小者优先（按录入的十进制值精确比较：0.1+0.2 与 0.3 视为同成本，
  *    而 1e-10 级的真实差额仍严格区分，序号决胜不得覆盖成本差）；
  * 3. 按挂装顺序的 (块录入序号, 位置录入序号) 序列字典序最小者优先。
  */
 function isBetter(a: Candidate, b: Candidate | null): boolean {
   if (b === null) return true;
-  if (a.plan.minTorqueMargin > b.plan.minTorqueMargin + EPS) return true;
-  if (a.plan.minTorqueMargin < b.plan.minTorqueMargin - EPS) return false;
+  if (a.plan.minTorqueMargin > b.plan.minTorqueMargin) return true;
+  if (a.plan.minTorqueMargin < b.plan.minTorqueMargin) return false;
   const costOrder = decimalCompare(a.cost, b.cost);
   if (costOrder < 0) return true;
   if (costOrder > 0) return false;
@@ -173,11 +177,12 @@ export function adjudicate(scenario: Scenario): AdjudicationOutcome {
         // 精确十进制累加本步代价（代价非负，规模 ≤7，开销可忽略）。
         const nextCost = decimalAdd(cost, opt.costDecimal);
         if (best) {
-          // 力矩余量已严格劣于最优解，剪枝。
-          if (nextMinMargin < best.plan.minTorqueMargin - EPS) continue;
-          // 余量无法严格更优，而代价（非负，继续挂装只会更高）已严格更贵，剪枝。
+          // 力矩余量沿前缀单调不增：已严格劣于最优解时，任何完成都追不平，剪枝。
+          // 严格比较（不容差）：再小的真实余量差（如 5e-10）都不得被成本覆盖。
+          if (nextMinMargin < best.plan.minTorqueMargin) continue;
+          // 余量最多只能并列最优，而代价（非负，继续挂装只会更高）已严格更贵，剪枝。
           // 精确十进制比较：哪怕只差 1e-10 也必须保留更便宜的分支。
-          if (nextMinMargin < best.plan.minTorqueMargin + EPS && decimalCompare(nextCost, best.cost) > 0) {
+          if (nextMinMargin <= best.plan.minTorqueMargin && decimalCompare(nextCost, best.cost) > 0) {
             continue;
           }
         }
